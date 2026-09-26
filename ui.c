@@ -269,13 +269,13 @@ static int btn_wait_release(void)
     }
 
     if (dt > BUTTON_DOWN_LONG_TICKS &&
-      ticks > last_button_repeat_ticks) {
+      ticks - last_button_repeat_ticks > BUTTON_REPEAT_TICKS) {  // elapsed time, wrap safe
       int status = 0;
       if (cur_button & (1<<BIT_DOWN1))
         status |= (config.flip ? EVT_UP: EVT_DOWN) | EVT_REPEAT;
       if (cur_button & (1<<BIT_UP1))
         status |= (config.flip ? EVT_DOWN:EVT_UP) | EVT_REPEAT;
-      last_button_repeat_ticks = ticks + BUTTON_REPEAT_TICKS;
+      last_button_repeat_ticks = ticks;
       return status;
     }
   }

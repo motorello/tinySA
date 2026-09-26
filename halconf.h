@@ -302,11 +302,14 @@
  * @brief   Serial buffers size.
  * @details Configuration parameter, you can change the depth of the queue
  *          buffers depending on the requirements of your application.
- * @note    The default is 64 bytes for both the transmission and receive
+ * @note    The default is 16 bytes for both the transmission and receive
  *          buffers.
  */
-#if !defined(SERIAL_BUFFERS_SIZE) || defined(__DOXYGEN__)
-#define SERIAL_BUFFERS_SIZE         64
+#if !defined(SERIAL_RX_BUFFERS_SIZE) || defined(__DOXYGEN__)
+#define SERIAL_RX_BUFFERS_SIZE      16
+#endif
+#if !defined(SERIAL_TX_BUFFERS_SIZE) || defined(__DOXYGEN__)
+#define SERIAL_TX_BUFFERS_SIZE      16
 #endif
 
 /*===========================================================================*/
@@ -317,23 +320,25 @@
  * @brief   Serial over USB buffers size.
  * @details Configuration parameter, the buffer size must be a multiple of
  *          the USB data endpoint maximum packet size.
- * @note    The default is 64 bytes for both the transmission and receive
+ * @note    The default is 256 bytes for both the transmission and receive
  *          buffers.
  */
-#if !defined(SERIAL_USB_BUFFERS_SIZE) || defined(__DOXYGEN__)
-#ifdef TINYSA4
-#define SERIAL_USB_BUFFERS_SIZE     128
-#else
-#define SERIAL_USB_BUFFERS_SIZE     128
+#if !defined(SERIAL_USB_RX_BUFFERS_SIZE) || defined(__DOXYGEN__)
+#define SERIAL_USB_RX_BUFFERS_SIZE  256
 #endif
+#if !defined(SERIAL_USB_TX_BUFFERS_SIZE) || defined(__DOXYGEN__)
+#define SERIAL_USB_TX_BUFFERS_SIZE  256
 #endif
 
 /**
  * @brief   Serial over USB number of buffers.
  * @note    The default is 2 buffers.
  */
-#if !defined(SERIAL_USB_BUFFERS_NUMBER) || defined(__DOXYGEN__)
-#define SERIAL_USB_BUFFERS_NUMBER   2
+#if !defined(SERIAL_USB_RX_BUFFERS_NUMBER) || defined(__DOXYGEN__)
+#define SERIAL_USB_RX_BUFFERS_NUMBER 2
+#endif
+#if !defined(SERIAL_USB_TX_BUFFERS_NUMBER) || defined(__DOXYGEN__)
+#define SERIAL_USB_TX_BUFFERS_NUMBER 2
 #endif
 
 /*===========================================================================*/

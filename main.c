@@ -2708,6 +2708,7 @@ void shell_update_speed(void){
 }
 
 void shell_reset_console(void){
+  osalSysLock();                           // I-class calls below, must run locked
   // Reset I/O queue over USB (for USB need also connect/disconnect)
   if (usb_IsActive()){
     if (config._mode & _MODE_SERIAL)
@@ -2720,7 +2721,8 @@ void shell_reset_console(void){
 //  iqResetI(&SD1.iqueue);
   qResetI(&SD1.oqueue);
   qResetI(&SD1.iqueue);
-
+  osalOsRescheduleS();
+  osalSysUnlock();
 }
 
 
@@ -2901,7 +2903,12 @@ static void VNAShell_executeLine(char *line)
         int timeout_count = 0;
         msg_t result;
         do {
-          result = osalThreadEnqueueTimeoutS(&shell_thread, MS2ST(5000));  // 5 second timeout
+          chSysLock();                          // S-class call, must run locked
+          if (shell_function)
+            result = osalThreadEnqueueTimeoutS(&shell_thread, MS2ST(5000));  // 5 second timeout
+          else
+            result = MSG_OK;
+          chSysUnlock();
           if (result == MSG_TIMEOUT) {
             timeout_count++;
             if (timeout_count > 3) {
