@@ -1356,8 +1356,8 @@ static uint8_t SD_WaitNotBusy(uint32_t wait_time) {
 
 // Receive data block from SD
 static bool SD_RxDataBlock(uint8_t *buff, uint16_t len, uint8_t token) {
-  // loop until receive read response token or timeout ~50ms
-  if (!SD_WaitDataToken(token, MS2ST(50))) {
+  // loop until receive read response token or timeout 200ms (SDHC/SDXC read access time can be up to 100ms)
+  if (!SD_WaitDataToken(token, MS2ST(200))) {
     DEBUG_PRINT(" rx SD_WaitDataToken err\r\n");
     return FALSE;
   }
@@ -1426,8 +1426,10 @@ error_tx:
 static uint8_t SD_SendCmd(uint8_t cmd, uint32_t arg) {
   uint8_t buf[6];
   volatile uint8_t r1;
-  // wait SD ready after last Tx (recommended timeout is 250ms (500ms for SDXC) set 250ms
-  if ((r1 = SD_WaitNotBusy(MS2ST(500))) != 0xFF) {
+  // wait SD ready after last Tx (recommended timeout is 250ms (500ms for SDXC) set 250ms)
+  // Not for STOP_TRANSMISSION: during a multiple block read the card is sending data, not busy,
+  // and the data can contain no 0xFF at all (then CMD12 would never be sent)
+  if (cmd != CMD12 && (r1 = SD_WaitNotBusy(MS2ST(500))) != 0xFF) {
     DEBUG_PRINT(" SD_WaitNotBusy CMD%d err, %02x\r\n", cmd-0x40, (uint32_t)r1);
     return 0xFF;
   }
@@ -1449,11 +1451,11 @@ static uint8_t SD_SendCmd(uint8_t cmd, uint32_t arg) {
   buf[5] = crc;
 #endif
   spi_TxBuffer(buf, 6);
-// Skip a stuff byte when STOP_TRANSMISSION
-//if (cmd == CMD12) SPI_RxByte();
   // Receive response register r1
    // 8th bit R1 always zero, check it
   spi_DropRx();
+  // Skip a stuff byte when STOP_TRANSMISSION
+  if (cmd == CMD12) spi_RxByte();
   int cnt = 100;
   while(((r1=spi_RxByte())&0x80) && --cnt) {
     if (cmd != CMD24 && cmd != CMD17 ) DEBUG_PRINT(" r1=0x%x", (uint32_t)r1);
@@ -1611,6 +1613,7 @@ DSTATUS disk_status(BYTE pdrv) {
 DRESULT disk_read(BYTE pdrv, BYTE* buff, DWORD sector, UINT count) {
   // No disk or wrong block count
   if (pdrv != 0 || (Stat & STA_NOINIT)) return RES_NOTRDY;
+  if (count == 0) return RES_PARERR;
   // convert to byte address
   if (!(CardType & CT_BLOCK)) sector *= SD_SECTOR_SIZE;
 
@@ -1621,8 +1624,6 @@ DRESULT disk_read(BYTE pdrv, BYTE* buff, DWORD sector, UINT count) {
 
   SD_Select_SPI();
   uint8_t cmd = count == 1 ? CMD17 : CMD18;
-    // convert to byte address
-  if (!(CardType & CT_BLOCK)) sector*= SD_SECTOR_SIZE;
   // Read single / multiple block
   if (SD_SendCmd(cmd, sector) == 0) {
     do {
@@ -1657,6 +1658,7 @@ DRESULT disk_read(BYTE pdrv, BYTE* buff, DWORD sector, UINT count) {
 DRESULT disk_write(BYTE pdrv, const BYTE* buff, DWORD sector, UINT count) {
   // No disk or wrong count
   if (pdrv != 0 || (Stat & STA_NOINIT)) return RES_NOTRDY;
+  if (count == 0) return RES_PARERR;
   // Write protection
   if (Stat & STA_PROTECT) return RES_WRPRT;
   #if DEBUG == 1
@@ -1734,12 +1736,13 @@ DRESULT disk_ioctl(BYTE pdrv, BYTE cmd, void* buff) {
     // This command is used by only f_mkfs function and it attempts to align data area on the erase block boundary.
     // It is required when FF_USE_MKFS == 1.
     case GET_BLOCK_SIZE:
-   	 *(uint16_t*) buff = ;//SD_SECTOR_SIZE;
+      *(DWORD*) buff = 1;
       res = RES_OK;
     break;
+#endif
     // Retrieves number of available sectors, the largest allowable LBA + 1, on the drive into the LBA_t variable pointed by buff.
     // This command is used by f_mkfs and f_fdisk function to determine the size of volume/partition to be created.
-    // It is required when FF_USE_MKFS == 1.
+    // Also used by the USB mass storage READ CAPACITY command.
     case GET_SECTOR_COUNT:
     {
       // SEND_CSD
@@ -1759,7 +1762,6 @@ DRESULT disk_ioctl(BYTE pdrv, BYTE cmd, void* buff) {
       }
     }
     break;
-#endif
   }
   SD_Unselect_SPI();
   DEBUG_PRINT("disk_ioctl(%d) = %d,\r\n", cmd, res);
