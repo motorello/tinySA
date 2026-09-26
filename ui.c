@@ -4393,6 +4393,90 @@ static UI_FUNCTION_CALLBACK(menu_save_traces_cb) {
   sa_save_file(FMT_CSV_FILE);
 }
 
+#ifdef __USE_USB_MSC__
+// USB DISK mode: the SD card is a USB drive on the PC (usb_msc.c), sweeping and screen updates stop.
+// While the medium is ready the mass storage thread owns SPI1 and spi_buffer, so nothing is drawn.
+void usb_disk_mode(void)
+{
+  int x = 10, y = 10;
+  DWORD blocks = 0;
+  const char *error = NULL;
+  // A command running in the shell thread could still use SPI1, wait until it is finished
+  chSysLock();
+  msc_disk_mode = true;
+  chSysUnlock();
+  systime_t start = chVTGetSystemTimeX();
+  while (shell_direct_cmd && chVTGetSystemTimeX() - start < MS2ST(2000))
+    chThdSleepMilliseconds(5);
+  if (shell_direct_cmd)
+    error = "busy, try again";
+  else if (!SD_Inserted())
+    error = "no SD card";
+  else {
+#ifdef __MCU_CLOCK_SHIFT__
+    clock_at_48MHz();                // The sweep shifts the MCU clock, which also clocks USB
+#endif
+    SD_PowerOff();                   // Force a full card initialization
+    if ((disk_initialize(0) & STA_NOINIT) || disk_ioctl(0, GET_SECTOR_COUNT, &blocks) != RES_OK || blocks == 0)
+      error = "SD card error";
+  }
+  ili9341_set_foreground(LCD_FG_COLOR);
+  ili9341_set_background(LCD_BG_COLOR);
+  ili9341_clear_screen();
+  lcd_set_font(FONT_NORMAL);
+  if (error) {
+    lcd_printf(x, y, "USB DISK: %s", error);
+    lcd_printf(x, y + 2*bFONT_STR_HEIGHT, "Touch screen or press to continue");
+  } else {
+    lcd_printf(x, y, "USB DISK MODE");
+    y += 2*bFONT_STR_HEIGHT;
+    lcd_printf(x, y, "The SD card (%d MB) is a USB drive on the PC.", (int)(blocks / 2048));
+    y += bFONT_STR_HEIGHT;
+    lcd_printf(x, y, "Measurements are stopped.");
+    y += 2*bFONT_STR_HEIGHT;
+    lcd_printf(x, y, "Eject the drive on the PC,");
+    y += bFONT_STR_HEIGHT;
+    lcd_printf(x, y, "then touch the screen or press to exit.");
+  }
+  lcd_set_font(FONT_SMALL);
+  ili9341_bulk_finish();             // No SPI1 use from here until msc_medium_stop()
+  msc_exit_request = false;
+  if (!error)
+    msc_medium_start(blocks);
+  while (true) {
+    if (touch_check() == EVT_TOUCH_PRESSED)
+      break;
+    if (btn_check() & EVT_BUTTON_SINGLE_CLICK)
+      break;
+    if (msc_exit_request)
+      break;
+    if (!error && (msc_eject_requested() || !SD_Inserted()))
+      break;
+    chThdSleepMilliseconds(40);
+#ifdef __WATCHDOG__
+    wdgReset(&WDGD1);
+#endif
+  }
+  if (!error)
+    msc_medium_stop();
+  SD_PowerOff();                     // The PC may have changed the card
+  msc_exit_request = false;
+  msc_enter_request = false;
+  msc_disk_mode = false;
+  touch_wait_release();
+  dirty = true;                      // Restore MCU clock and hardware settings on the next sweep
+  ui_mode_normal();
+  redraw_frame();
+  request_to_redraw_grid();
+}
+
+static UI_FUNCTION_CALLBACK(menu_usb_disk_cb) {
+  (void)item;
+  (void)data;
+  usb_disk_mode();
+}
+#endif
+
 
 
 static UI_FUNCTION_ADV_CALLBACK(menu_autoname_acb)
@@ -5434,6 +5518,9 @@ static const menuitem_t menu_storage[] = {
   { MT_CALLBACK,    FMT_PRS_FILE,   "SAVE\nSETTINGS",       menu_sdcard_cb},
   { MT_CALLBACK,    FMT_CFG_FILE,   "SAVE\nCONFIG",         menu_sdcard_cb},
   { MT_CALLBACK,    FMT_CSV_FILE,   "SAVE\nTRACES",         menu_save_traces_cb},
+#ifdef __USE_USB_MSC__
+  { MT_CALLBACK,    0,              "USB\nDISK",            menu_usb_disk_cb},
+#endif
   { MT_SUBMENU,     0,              "CONFIG",               menu_storage_config },
 //  { MT_KEYPAD,      KM_INTERVAL,    "INTERVAL\n\b%s",       NULL },
   { MT_NONE,    0, NULL, menu_back} // next-> menu_back

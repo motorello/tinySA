@@ -109,6 +109,7 @@
 //#define __SD_CARD_LOAD__          // Allow run commands from SD card (config.ini in root), if enabled __SD_FILE_BROWSER__ scripts run from *.cmd in it
 #define __SD_CARD_DUMP_FIRMWARE__ // Allow dump firmware to SD card
 #define __SD_FILE_BROWSER__
+#define __USE_USB_MSC__           // USB DISK mode: SD card as USB mass storage next to the USB serial port
 #define __LCD_BRIGHTNESS__        // LCD or hardware allow change brightness, add menu item for this
 #define __HARMONIC__
 #define __NOISE_FIGURE__
@@ -1768,6 +1769,22 @@ void save_csv(uint8_t mask);
 // not come from SD. Used to default the name when storing a preset back to SD.
 extern char sd_preset_path[FF_LFN_BUF];
 #endif
+#ifdef __USE_USB_MSC__
+// USB mass storage (usb_msc.c). While USB DISK mode is active the MSC thread owns SPI1 and spi_buffer.
+extern volatile bool msc_disk_mode;      // USB DISK mode active
+extern volatile bool msc_enter_request;  // set by "usbdisk on", handled in the sweep thread
+extern volatile bool msc_exit_request;   // set by "usbdisk off", handled by usb_disk_mode()
+extern volatile bool shell_direct_cmd;   // shell thread is executing a command directly
+void msc_init(void);
+void msc_medium_start(uint32_t blocks);
+void msc_medium_stop(void);
+bool msc_eject_requested(void);
+void usb_disk_mode(void);
+void clock_at_48MHz(void);
+#endif
+#endif
+#if defined(__USE_USB_MSC__) && !defined(__USE_SD_CARD__)
+#error "__USE_USB_MSC__ needs __USE_SD_CARD__"
 #endif
 
 /*

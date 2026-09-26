@@ -15,6 +15,10 @@
 */
 
 #include "hal.h"
+#include "nanovna.h"
+#ifdef __USE_USB_MSC__
+#include "usb_msc.h"
+#endif
 
 /* Virtual serial port over USB.*/
 SerialUSBDriver SDU1;
@@ -30,6 +34,23 @@ SerialUSBDriver SDU1;
  * USB Device Descriptor.
  */
 static const uint8_t vcom_device_descriptor_data[18] = {
+#ifdef __USE_USB_MSC__
+  /* Composite device: CDC (serial) + mass storage (SD card).*/
+  USB_DESC_DEVICE       (0x0200,        /* bcdUSB (2.0), for the IAD.       */
+                         0xEF,          /* bDeviceClass (Miscellaneous).    */
+                         0x02,          /* bDeviceSubClass (Common Class).  */
+                         0x01,          /* bDeviceProtocol (IAD).           */
+                         0x40,          /* bMaxPacketSize.                  */
+                         0x0483,        /* idVendor (ST).                   */
+                         0x5740,        /* idProduct.                       */
+                         0x0201,        /* bcdDevice, changed with the
+                                           composite layout so that Windows
+                                           selects the drivers again.       */
+                         1,             /* iManufacturer.                   */
+                         2,             /* iProduct.                        */
+                         3,             /* iSerialNumber.                   */
+                         1)             /* bNumConfigurations.              */
+#else
   USB_DESC_DEVICE       (0x0110,        /* bcdUSB (1.1).                    */
                          0x02,          /* bDeviceClass (CDC).              */
                          0x00,          /* bDeviceSubClass.                 */
@@ -42,6 +63,7 @@ static const uint8_t vcom_device_descriptor_data[18] = {
                          2,             /* iProduct.                        */
                          3,             /* iSerialNumber.                   */
                          1)             /* bNumConfigurations.              */
+#endif
 };
 
 /*
@@ -52,15 +74,32 @@ static const USBDescriptor vcom_device_descriptor = {
   vcom_device_descriptor_data
 };
 
-/* Configuration Descriptor tree for a CDC.*/
-static const uint8_t vcom_configuration_descriptor_data[67] = {
+/* Configuration Descriptor tree for a CDC (and mass storage).*/
+#ifdef __USE_USB_MSC__
+#define VCOM_CONFIGURATION_SIZE 98
+#define VCOM_INTERFACES         3
+#else
+#define VCOM_CONFIGURATION_SIZE 67
+#define VCOM_INTERFACES         2
+#endif
+static const uint8_t vcom_configuration_descriptor_data[VCOM_CONFIGURATION_SIZE] = {
   /* Configuration Descriptor.*/
-  USB_DESC_CONFIGURATION(67,            /* wTotalLength.                    */
-                         0x02,          /* bNumInterfaces.                  */
+  USB_DESC_CONFIGURATION(VCOM_CONFIGURATION_SIZE, /* wTotalLength.          */
+                         VCOM_INTERFACES, /* bNumInterfaces.                */
                          0x01,          /* bConfigurationValue.             */
                          0,             /* iConfiguration.                  */
                          0xC0,          /* bmAttributes (self powered).     */
                          50),           /* bMaxPower (100mA).               */
+#ifdef __USE_USB_MSC__
+  /* Interface Association Descriptor: interfaces 0 and 1 are the CDC
+     function (protocol 0 as in the interface descriptor).*/
+  USB_DESC_INTERFACE_ASSOCIATION(0x00,  /* bFirstInterface.                 */
+                         0x02,          /* bInterfaceCount.                 */
+                         0x02,          /* bFunctionClass (CDC).            */
+                         0x02,          /* bFunctionSubClass (ACM).         */
+                         0x00,          /* bFunctionProtocol.               */
+                         0),            /* iInterface.                      */
+#endif
   /* Interface Descriptor.*/
   USB_DESC_INTERFACE    (0x00,          /* bInterfaceNumber.                */
                          0x00,          /* bAlternateSetting.               */
@@ -126,7 +165,29 @@ static const uint8_t vcom_configuration_descriptor_data[67] = {
   USB_DESC_ENDPOINT     (USBD1_DATA_REQUEST_EP|0x80,    /* bEndpointAddress.*/
                          0x02,          /* bmAttributes (Bulk).             */
                          0x0040,        /* wMaxPacketSize.                  */
-                         0x00)          /* bInterval.                       */
+                         0x00),         /* bInterval.                       */
+#ifdef __USE_USB_MSC__
+  /* Mass storage Interface Descriptor.*/
+  USB_DESC_INTERFACE    (MSC_IF,        /* bInterfaceNumber.                */
+                         0x00,          /* bAlternateSetting.               */
+                         0x02,          /* bNumEndpoints.                   */
+                         0x08,          /* bInterfaceClass (Mass Storage).  */
+                         0x06,          /* bInterfaceSubClass (SCSI
+                                           transparent command set).        */
+                         0x50,          /* bInterfaceProtocol (Bulk-Only
+                                           Transport).                      */
+                         0),            /* iInterface.                      */
+  /* Mass storage bulk OUT Endpoint Descriptor.*/
+  USB_DESC_ENDPOINT     (MSC_EP,        /* bEndpointAddress.                */
+                         0x02,          /* bmAttributes (Bulk).             */
+                         0x0040,        /* wMaxPacketSize.                  */
+                         0x00),         /* bInterval.                       */
+  /* Mass storage bulk IN Endpoint Descriptor.*/
+  USB_DESC_ENDPOINT     (MSC_EP|0x80,   /* bEndpointAddress.                */
+                         0x02,          /* bmAttributes (Bulk).             */
+                         0x0040,        /* wMaxPacketSize.                  */
+                         0x00),         /* bInterval.                       */
+#endif
 };
 
 /*
@@ -320,6 +381,11 @@ static const USBEndpointConfig ep2config = {
   NULL,
 };
 
+#ifdef __USE_USB_MSC__
+/* First free packet memory address after the buffer table and EP0.*/
+static uint32_t pm_after_ep0;
+#endif
+
 /*
  * Handles the USB driver global events.
  */
@@ -328,20 +394,59 @@ static void usb_event(USBDriver *usbp, usbevent_t event) {
 
   switch (event) {
   case USB_EVENT_RESET:
+#ifdef __USE_USB_MSC__
+    {
+      /* usb_lld_reset() has just allocated the EP0 buffers.*/
+      pm_after_ep0 = usbp->pmnext;
+      /* Also invoked from usbStart() with the system locked.*/
+      syssts_t sts = chSysGetStatusAndLockX();
+      msc_usb_reset_I();
+      chSysRestoreStatusX(sts);
+    }
+#endif
     return;
   case USB_EVENT_ADDRESS:
     return;
   case USB_EVENT_CONFIGURED:
     chSysLockFromISR();
+#ifdef __USE_USB_MSC__
+    /* Fork-specific (re-check after a ChibiOS upgrade): SET_CONFIGURATION does
+       not free the endpoint packet memory, a repeated one without bus reset
+       would overflow the 512 byte packet memory with the mass storage
+       endpoints. It is also raised for configuration 0.*/
+    usbp->pmnext = pm_after_ep0;
+    usbp->epc[USBD1_DATA_REQUEST_EP] = NULL;
+    usbp->epc[USBD1_INTERRUPT_REQUEST_EP] = NULL;
+    usbp->epc[MSC_EP] = NULL;
+    usbp->transmitting &= 1U;
+    usbp->receiving &= 1U;
+    if (usbp->state != USB_ACTIVE) {
+      /* SET_CONFIGURATION(0): disable the endpoints.*/
+      for (usbep_t ep = 1; ep <= MSC_EP; ep++) {
+        STM32_USB->EPR[ep] = STM32_USB->EPR[ep];  /* Clears the toggle bits.*/
+        STM32_USB->EPR[ep] = 0;
+      }
+      sduDisconnectI(&SDU1);
+      msc_configured_I(false);
+      chSysUnlockFromISR();
+      return;
+    }
+#endif
 
     /* Enables the endpoints specified into the configuration.
        Note, this callback is invoked from an ISR so I-Class functions
        must be used.*/
     usbInitEndpointI(usbp, USBD1_DATA_REQUEST_EP, &ep1config);
     usbInitEndpointI(usbp, USBD1_INTERRUPT_REQUEST_EP, &ep2config);
+#ifdef __USE_USB_MSC__
+    usbInitEndpointI(usbp, MSC_EP, &msc_ep_config);
+#endif
 
     /* Resetting the state of the CDC subsystem.*/
     sduConfigureHookI(&SDU1);
+#ifdef __USE_USB_MSC__
+    msc_configured_I(true);
+#endif
 
     chSysUnlockFromISR();
     return;
@@ -373,13 +478,30 @@ static void sof_handler(USBDriver *usbp) {
   osalSysUnlockFromISR();
 }
 
+#ifdef __USE_USB_MSC__
+/*
+ * Handles the mass storage requests, the others go to the CDC.
+ */
+static bool requests_hook(USBDriver *usbp) {
+  if (msc_requests_hook(usbp))
+    return true;
+  /* Never let the CDC handler answer a class request for the mass storage interface.*/
+  if ((usbp->setup.bmRequestType & USB_RTYPE_TYPE_MASK) == USB_RTYPE_TYPE_CLASS &&
+      (usbp->setup.wIndex & 0xFF) == MSC_IF)
+    return false;
+  return sduRequestsHook(usbp);
+}
+#else
+#define requests_hook sduRequestsHook
+#endif
+
 /*
  * USB driver configuration.
  */
 const USBConfig usbcfg = {
   usb_event,
   get_descriptor,
-  sduRequestsHook,
+  requests_hook,
   sof_handler
 };
 

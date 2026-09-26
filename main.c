@@ -40,6 +40,9 @@ int32_t frequencyExtra;
 
 static BaseSequentialStream *shell_stream;
 threads_queue_t shell_thread;
+#ifdef __USE_USB_MSC__
+volatile bool shell_direct_cmd = false;  // Shell thread executes a command itself (not in the sweep thread)
+#endif
 
 // Shell new line
 #define VNA_SHELL_NEWLINE_STR    "\r\n"
@@ -288,6 +291,14 @@ static THD_FUNCTION(Thread1, arg)
           redraw_request |= REDRAW_CAL_STATUS | REDRAW_AREA | REDRAW_FREQUENCY;
       }
     }
+#ifdef __USE_USB_MSC__
+    // "usbdisk on" from the shell
+    if (msc_enter_request) {
+      msc_enter_request = false;
+      operation_requested = OP_NONE;
+      usb_disk_mode();
+    }
+#endif
 //    START_PROFILE
     // Process UI inputs
     if (!(sweep_mode & SWEEP_SELFTEST)) {
@@ -1132,6 +1143,25 @@ VNA_SHELL_FUNCTION(cmd_sd_delete)
   }
 
   return;
+}
+#endif
+
+#ifdef __USE_USB_MSC__
+// USB DISK mode: SD card as USB mass storage, runs in the sweep thread until "usbdisk off"
+VNA_SHELL_FUNCTION(cmd_usbdisk)
+{
+  if (argc == 0) {
+    shell_printf("%s\r\n", msc_disk_mode ? "on" : "off");
+    return;
+  }
+  int m = generic_option_cmd("usbdisk", "off|on", argc, argv[0]);
+  if (m == 1 && !msc_disk_mode) {
+    chSysLock();
+    msc_enter_request = true;
+    operation_requested|=OP_CONSOLE;      // abort the current sweep
+    chSysUnlock();
+  } else if (m == 0 && msc_disk_mode)
+    msc_exit_request = true;
 }
 #endif
 
@@ -2478,10 +2508,15 @@ typedef struct {
 #define CMD_WAIT_MUTEX  1
 #define CMD_RUN_IN_LOAD 2
 #define CMD_RUN_IN_UI   4
+#ifdef __USE_USB_MSC__
+#define CMD_DISK_OK     8     // allowed in USB DISK mode, does not use SPI1 or spi_buffer
+#else
+#define CMD_DISK_OK     0
+#endif
 static const VNAShellCommand commands[] =
 {
-    {"version"     , cmd_version     , 0},
-    {"reset"       , cmd_reset       , 0},
+    {"version"     , cmd_version     , CMD_DISK_OK},
+    {"reset"       , cmd_reset       , CMD_DISK_OK},
     {"freq"        , cmd_freq        , CMD_WAIT_MUTEX | CMD_RUN_IN_LOAD},
 #ifdef __USE_RTC__
     {"time"        , cmd_time        , CMD_RUN_IN_LOAD},
@@ -2537,17 +2572,17 @@ static const VNAShellCommand commands[] =
 #endif
     {"capture"     , cmd_capture     , CMD_WAIT_MUTEX | CMD_RUN_IN_UI},
 #ifdef __REMOTE_DESKTOP__
-    {"refresh"     , cmd_refresh     , 0},
-    {"touch"       , cmd_touch       , 0},
-    {"release"     , cmd_release     , 0},
+    {"refresh"     , cmd_refresh     , CMD_DISK_OK},
+    {"touch"       , cmd_touch       , CMD_DISK_OK},
+    {"release"     , cmd_release     , CMD_DISK_OK},
 #endif
     {"vbat"        , cmd_vbat        , CMD_WAIT_MUTEX},     // Uses same adc as touch!!!!!
 #ifdef ENABLE_VBAT_OFFSET_COMMAND
     {"vbat_offset" , cmd_vbat_offset , CMD_RUN_IN_LOAD},
 #endif
-    {"help"        , cmd_help        , 0},
+    {"help"        , cmd_help        , CMD_DISK_OK},
 #ifdef ENABLE_INFO_COMMAND
-    {"info"        , cmd_info        , 0},
+    {"info"        , cmd_info        , CMD_DISK_OK},
 #endif
 #ifdef ENABLE_COLOR_COMMAND
     {"color"       , cmd_color       , CMD_RUN_IN_LOAD},
@@ -2597,8 +2632,11 @@ static const VNAShellCommand commands[] =
     { "sd_read",   cmd_sd_read,   CMD_WAIT_MUTEX },
     { "sd_delete", cmd_sd_delete, CMD_WAIT_MUTEX },
 #endif
+#ifdef __USE_USB_MSC__
+    { "usbdisk",   cmd_usbdisk,   CMD_DISK_OK },
+#endif
 #ifdef ENABLE_THREADS_COMMAND
-    {"threads"     , cmd_threads     , 0},
+    {"threads"     , cmd_threads     , CMD_DISK_OK},
 #endif
 #ifdef __SINGLE_LETTER__
    { "y", cmd_y,    CMD_WAIT_MUTEX },
@@ -2742,6 +2780,13 @@ static void shell_init_connection(void) {
  */
   shell_update_speed();
 
+#ifdef __USE_USB_MSC__
+/*
+ * Start the USB mass storage thread before the host can configure the device
+ */
+  msc_init();
+#endif
+
 /*
  * Activates the USB driver and then the USB bus pull-up on D+.
  * Note, a delay is inserted in order to not have to disconnect the cable
@@ -2780,6 +2825,13 @@ static void shell_init_connection(void){
  */
   sduObjectInit(&SDU1);
   sduStart(&SDU1, &serusbcfg);
+
+#ifdef __USE_USB_MSC__
+/*
+ * Start the USB mass storage thread before the host can configure the device
+ */
+  msc_init();
+#endif
 
 /*
  * Activates the USB driver and then the USB bus pull-up on D+.
@@ -2893,6 +2945,19 @@ static void VNAShell_executeLine(char *line)
     uint16_t cmd_flag = scp->flags;
     // Skip wait mutex if process UI
     if ((cmd_flag & CMD_RUN_IN_UI) && (sweep_mode&SWEEP_UI_MODE)) cmd_flag&=~CMD_WAIT_MUTEX;
+#ifdef __USE_USB_MSC__
+    // In USB DISK mode SPI1 and spi_buffer belong to the mass storage, only run commands that do not use them.
+    // shell_direct_cmd tells usb_disk_mode() to wait for a command already running in this thread.
+    chSysLock();
+    bool refuse = msc_disk_mode && !(cmd_flag & CMD_DISK_OK);
+    if (!refuse && !(cmd_flag & CMD_WAIT_MUTEX))
+      shell_direct_cmd = true;
+    chSysUnlock();
+    if (refuse) {
+      shell_printf("usb disk mode active" VNA_SHELL_NEWLINE_STR VNA_SHELL_PROMPT_STR);
+      return;
+    }
+#endif
     if (cmd_flag & CMD_WAIT_MUTEX) {
       chSysLock();
       shell_function = scp->sc_function;
@@ -2925,13 +2990,20 @@ static void VNAShell_executeLine(char *line)
       operation_requested = false; // otherwise commands  will be aborted
       scp->sc_function(shell_nargs - 1, &shell_args[1]);
       shell_printf(VNA_SHELL_PROMPT_STR);
+#ifdef __USE_USB_MSC__
+      if (dirty && !msc_disk_mode) {
+#else
       if (dirty) {
+#endif
         operation_requested = true;   // ensure output is updated
         if (MODE_OUTPUT(setting.mode))
           draw_menu();    // update screen if in output mode and dirty
         else
           redraw_request |= REDRAW_CAL_STATUS | REDRAW_AREA | REDRAW_FREQUENCY;
       }
+#ifdef __USE_USB_MSC__
+      shell_direct_cmd = false;     // after draw_menu(), which uses SPI1
+#endif
     }
     return;
   }
